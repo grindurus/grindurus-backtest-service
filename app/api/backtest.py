@@ -4,7 +4,10 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from x402 import  x402ResourceServer
+from x402.mechanisms.evm.exact import ExactEvmServerScheme
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.schemas.backtest import (
     BacktestCreateRequest,
@@ -15,17 +18,37 @@ from app.services import job_service
 
 router = APIRouter(tags=["backtest"])
 
+from x402.http import PaymentOption, HTTPFacilitatorClient, FacilitatorConfig
+from x402.http.types import RouteConfig
+
+facilitator = HTTPFacilitatorClient(
+    FacilitatorConfig(url="https://x402.org/facilitator")
+)
+server = x402ResourceServer(facilitator)
+server.register(settings.payment_wallet_network, ExactEvmServerScheme())
+
+
+routes: dict[str, RouteConfig] = {
+    "POST /backtest": RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=settings.payment_wallet_address,
+                price=settings.backtest_price_amount,
+                network=settings.payment_wallet_network,
+            ),
+        ],
+        mime_type="application/json",
+        description="Order a backtest",
+    ),
+}
+
 
 @router.post(
     "/backtest",
     response_model=BacktestCreateResponse,
     status_code=201,
     summary="Order a backtest",
-    description=(
-        "Creates a backtest job and returns payment instructions. "
-        "The frontend should prompt the user to send payment, then "
-        "poll GET /jobs/{job_id} until status is 'done'."
-    ),
 )
 async def create_backtest(
     body: BacktestCreateRequest,
@@ -39,9 +62,6 @@ async def create_backtest(
     return BacktestCreateResponse(
         job_id=job.id,
         status=job.status.value,
-        payment_address=job.payment_address,
-        payment_amount=job.payment_amount,
-        payment_token=job.payment_token,
     )
 
 

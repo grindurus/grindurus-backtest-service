@@ -1,3 +1,5 @@
+"""TODO: payment confirmation should be redone in a different fashion since x402 can not do callbacks."""
+
 """
 Webhook endpoints — called by external services, not the frontend.
 

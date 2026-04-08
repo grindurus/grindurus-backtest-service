@@ -5,6 +5,7 @@ Application entrypoint.
 """
 
 import logging
+from x402.http.middleware.fastapi import PaymentMiddlewareASGI
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +35,7 @@ app.add_middleware(
 app.include_router(backtest.router)
 app.include_router(webhooks.router)
 
+app.add_middleware(PaymentMiddlewareASGI, routes=backtest.routes, server=backtest.server)
 
 @app.get("/health", tags=["infra"])
 async def health() -> dict:

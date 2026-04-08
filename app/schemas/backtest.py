@@ -42,9 +42,6 @@ class BacktestCreateRequest(BaseModel):
 class BacktestCreateResponse(BaseModel):
     job_id: str
     status: str
-    payment_address: str
-    payment_amount: str
-    payment_token: str
     message: str = "Send payment to proceed. Poll GET /jobs/{job_id} for status."
 
 

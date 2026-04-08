@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     # ── Payment ───────────────────────────────────────────────
     # The wallet address users pay to.  In production this might be
     # generated per-job; for now one static address is fine.
+    payment_wallet_network: str = "eip155:84532"
     payment_wallet_address: str = "0x0000000000000000000000000000000000000000"
     payment_token_symbol: str = "USDC"
     # How many block confirmations before we trust a payment

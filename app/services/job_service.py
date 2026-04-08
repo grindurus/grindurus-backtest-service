@@ -99,7 +99,7 @@ async def confirm_payment(
     _transition(job, JobStatus.payment_confirmed)
     job.payment_tx_hash = tx_hash
 
-    # Step 2: immediately queue (no manual approval step for now)
+    # Step 2: immediately queue
     _transition(job, JobStatus.queued)
     await db.flush()
 

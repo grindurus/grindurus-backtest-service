@@ -23,10 +23,10 @@ class BacktestCreateRequest(BaseModel):
         ...,
         description="Arbitrary strategy / backtest parameters (forwarded to engine)",
         examples=[{
-            "strategy": "mean_reversion",
+            "strategy": "GrindURUS",
             "symbol": "ETH-USD",
-            "start_date": "2024-01-01",
-            "end_date": "2024-12-31",
+            "start_date": "2025-01-01",
+            "end_date": "2025-12-31",
             "timeframe": "1h",
             "initial_capital": 10000,
         }],

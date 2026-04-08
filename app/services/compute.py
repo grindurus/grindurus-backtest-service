@@ -40,33 +40,6 @@ class ComputeProvider(abc.ABC):
         ...
 
 
-# ── AWS Lambda via SQS ────────────────────────────────────────
-class AwsLambdaProvider(ComputeProvider):
-    """
-    Pushes a message onto an SQS queue.
-    A separate SQS → Lambda trigger picks it up and invokes the function.
-    """
-
-    async def dispatch(self, job_id: str, params: dict[str, Any]) -> None:
-        # boto3 is synchronous — run in a thread so we don't block the event loop
-        import boto3
-
-        def _send() -> None:
-            sqs = boto3.client("sqs", region_name=settings.aws_region)
-            sqs.send_message(
-                QueueUrl=settings.aws_sqs_queue_url,
-                MessageBody=json.dumps({
-                    "job_id": job_id,
-                    "params": params,
-                    "callback_url": f"{settings.api_base_url}/webhooks/backtest-complete",
-                }),
-                MessageGroupId="backtest",  # if using FIFO queue
-            )
-            logger.info("SQS message sent for job %s", job_id)
-
-        await asyncio.to_thread(_send)
-
-
 # ── Local / dev provider ──────────────────────────────────────
 class LocalProvider(ComputeProvider):
     """
@@ -104,7 +77,6 @@ class LocalProvider(ComputeProvider):
 
 # ── Factory ───────────────────────────────────────────────────
 _PROVIDERS: dict[str, type[ComputeProvider]] = {
-    "aws_lambda": AwsLambdaProvider,
     "local": LocalProvider,
 }
 

@@ -1,8 +1,3 @@
-"""
-SQLAlchemy ORM models.
-
-The single source of truth for the "jobs" table.
-"""
 
 from __future__ import annotations
 
@@ -21,26 +16,12 @@ class Base(DeclarativeBase):
 
 # ── Job status lifecycle ──────────────────────────────────────
 class JobStatus(str, enum.Enum):
-    awaiting_payment = "awaiting_payment"
-    payment_confirmed = "payment_confirmed"
     queued = "queued"
     running = "running"
     done = "done"
     failed = "failed"
-    expired = "expired"  # payment never arrived
 
 
-# Legal state transitions (source → allowed targets)
-ALLOWED_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
-    JobStatus.awaiting_payment: {JobStatus.payment_confirmed, JobStatus.expired},
-    JobStatus.payment_confirmed: {JobStatus.queued},
-    JobStatus.queued: {JobStatus.running, JobStatus.failed},
-    JobStatus.running: {JobStatus.done, JobStatus.failed},
-    # terminal states — no further transitions
-    JobStatus.done: set(),
-    JobStatus.failed: set(),
-    JobStatus.expired: set(),
-}
 
 
 class Job(Base):
@@ -53,8 +34,8 @@ class Job(Base):
     # ── Lifecycle ─────────────────────────────────────────────
     status: Mapped[JobStatus] = mapped_column(
         Enum(JobStatus, name="job_status", native_enum=False),
-        default=JobStatus.awaiting_payment,
-        index=True,
+        default=JobStatus.queued,
+        index=True
     )
 
     # ── Payment info ──────────────────────────────────────────
@@ -91,10 +72,6 @@ class Job(Base):
     __table_args__ = (
         Index("ix_jobs_owner_created", "owner", "created_at"),
     )
-
-    # ── Helpers ───────────────────────────────────────────────
-    def can_transition_to(self, target: JobStatus) -> bool:
-        return target in ALLOWED_TRANSITIONS.get(self.status, set())
 
     def __repr__(self) -> str:
         return f"<Job {self.id} [{self.status.value}]>"

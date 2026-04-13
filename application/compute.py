@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from app.core.config import settings
+from application import settings
 
 logger = logging.getLogger(__name__)
 

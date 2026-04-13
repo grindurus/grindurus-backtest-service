@@ -1,10 +1,3 @@
-"""
-Pydantic schemas for the API layer.
-
-Backtest params and results are intentionally kept as free-form dicts —
-the backtest engine owns those schemas, not us.
-"""
-
 from __future__ import annotations
 
 from datetime import datetime

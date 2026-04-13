@@ -9,4 +9,4 @@ Compute provider calls webhooks/backtest-completed which either transfers a job 
 Currently there is only a local compute provider, that waits for 3 seconds and returns default mock result. 
 
 To create a new one you should define the one that calls whatever platform you'll use for backtests.
-
+  

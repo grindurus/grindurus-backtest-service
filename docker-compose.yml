@@ -1,6 +1,15 @@
+# docker-compose.yml
+# $ docker compose up -d --build
+
+version: "3.9"
+
+name: backtest-service
+
 services:
   db:
     image: postgres:16-alpine
+    container_name: backtest-db
+    restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
@@ -14,6 +23,38 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  api:
+    build: .
+    container_name: backtest-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://backtest:backtest@db:5432/backtest
+      APP_MODE: prod
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=grindurus
+      # --- localhost (HTTP only) ---
+      - traefik.http.routers.api-local.rule=Host(`backtest.localhost`)
+      - traefik.http.routers.api-local.entrypoints=web
+
+      # --- prod HTTP → HTTPS redirect ---
+      - traefik.http.routers.api-http.rule=Host(`backtest.grindurus.xyz`)
+      - traefik.http.routers.api-http.entrypoints=web
+      - traefik.http.routers.api-http.middlewares=redirect-to-https
+      - traefik.http.middlewares.redirect-to-https.redirectScheme.scheme=https
+      - traefik.http.middlewares.redirect-to-https.redirectScheme.permanent=true
+
+      # --- prod HTTPS with certificate ---
+      - traefik.http.routers.api.rule=Host(`backtest.grindurus.xyz`)
+      - traefik.http.routers.api.entrypoints=websecure
+      - traefik.http.routers.api.tls.certresolver=le
+
+      # --- general backend ---
+      - traefik.http.services.api.loadbalancer.server.port=8001
 
 volumes:
   pgdata:

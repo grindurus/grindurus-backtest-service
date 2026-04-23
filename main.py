@@ -1,38 +1,44 @@
-"""
-Application entrypoint.
-
-    uvicorn application.main:application --reload
-"""
-
 import logging
 from datetime import datetime
-from typing import Any
+from decimal import Decimal
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db import job_service, settings, webhooks
-from db.database import get_db
-from payments import PaymentAdapter, X402PaymentAdapter
+from db.database import get_db, init_db
+from db.models import QueueStatus
+from db.schemas import (
+    HistoryCreate,
+    HistoryItemResponse,
+    QueueCreate,
+    QueueItemResponse,
+    QueueStatusUpdate,
+)
+from db.service import (
+    add_history_record,
+    enqueue_backtest,
+    list_queue,
+    list_history,
+    pop_next_backtest,
+    update_queue_status,
+)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)-30s %(levelname)-8s %(message)s",
 )
 
-class BacktestService:
-   
 
-    def __init__(self, payment_adapter: PaymentAdapter | None = None) -> None:
+class BacktestService:
+    def __init__(self) -> None:
         self.app = FastAPI(
             title="Backtest API",
-            summary="Payment gate for paid algorithmic-strategy backtests",
+            summary="Backtests queue and history service",
             version="0.1.0",
             docs_url="/docs",
         )
-        self.payment_adapter = payment_adapter or X402PaymentAdapter()
         self._setup_middlewares()
         self._setup_routes()
 
@@ -44,125 +50,152 @@ class BacktestService:
             allow_methods=["*"],
             allow_headers=["*"],
         )
-        self.app.include_router(webhooks.router)
 
-        if settings.app_mode != "test":
-            for middleware in self.payment_adapter.get_middleware_specs():
-                self.app.add_middleware(middleware.middleware_cls, **middleware.kwargs)
+        @self.app.on_event("startup")
+        async def _startup_init_db() -> None:
+            await init_db()
+            logging.info("Database schema ensured")
 
     def _setup_routes(self) -> None:
-        class BacktestCreateRequest(BaseModel):
-            params: dict[str, Any] = Field(
-                ...,
-                description="Arbitrary strategy / backtest parameters (forwarded to engine)",
-                examples=[
-                    {
-                        "strategy": "GrindURUS",
-                        "symbol": "ETH-USD",
-                        "start_date": "2025-01-01",
-                        "end_date": "2025-12-31",
-                        "timeframe": "1h",
-                        "initial_capital": 10000,
-                    }
-                ],
-            )
-            owner_address: str | None = Field(
-                None,
-                description="Wallet address of the requester (for lookup later)",
-            )
+        class BacktestRequest(BaseModel):
+            # New flat format.
+            base_asset: str | None = None
+            quote_asset: str | None = None
+            period_start: datetime | None = None
+            period_end: datetime | None = None
+            base_balance_start: Decimal | None = None
+            quote_balance_start: Decimal | None = None
+            priority_usdc: Decimal | None = None
+            creator_address: str | None = None
+            payment_method: str | None = None
 
-        class CreateBacktestRequest(BaseModel):
-            start_time: datetime
-            end_time: datetime
-            symbol: str = Field(..., min_length=1)
-            base_asset: float = Field(..., gt=0)
-            quote_asset: float = Field(..., gt=0)
+            # Legacy format.
+            params: dict | None = None
+            owner_address: str | None = None
 
             @model_validator(mode="after")
-            def validate_time_range(self) -> "BacktestService.CreateBacktestRequest":
-                if self.end_time <= self.start_time:
-                    raise ValueError("end_time must be greater than start_time")
+            def normalize_and_validate(self) -> "BacktestRequest":
+                if self.params is not None:
+                    params = self.params
+                    self.base_asset = self.base_asset or params.get("base_asset")
+                    self.quote_asset = self.quote_asset or params.get("quote_asset")
+                    self.period_start = self.period_start or params.get("period_start") or params.get("date_from")
+                    self.period_end = self.period_end or params.get("period_end") or params.get("date_to")
+                    self.base_balance_start = (
+                        self.base_balance_start
+                        or params.get("base_balance_start")
+                        or params.get("base_amount")
+                    )
+                    self.quote_balance_start = (
+                        self.quote_balance_start
+                        or params.get("quote_balance_start")
+                        or params.get("quote_amount")
+                    )
+                    self.priority_usdc = self.priority_usdc or params.get("priority_usdc") or Decimal("0")
+                    self.creator_address = self.creator_address or self.owner_address or params.get("creator_address")
+                    self.payment_method = self.payment_method or params.get("payment_method") or params.get("pay_method")
+
+                missing_fields = [
+                    field
+                    for field in (
+                        "base_asset",
+                        "quote_asset",
+                        "period_start",
+                        "period_end",
+                        "base_balance_start",
+                        "quote_balance_start",
+                        "priority_usdc",
+                        "creator_address",
+                    )
+                    if getattr(self, field) is None
+                ]
+                if missing_fields:
+                    raise ValueError(f"Missing required fields: {', '.join(missing_fields)}")
                 return self
 
-        class BacktestCreateResponse(BaseModel):
-            job_id: str
-            status: str
-            message: str = "Send payment to proceed. Poll GET /jobs/{job_id} for status."
-
-        class JobStatusResponse(BaseModel):
-            job_id: str
-            status: str
-            created_at: datetime
-            updated_at: datetime
-            result: dict[str, Any] | None = None
-            error_message: str | None = None
-            payment_tx_hash: str | None = None
         @self.app.post(
             "/backtest",
-            response_model=BacktestCreateResponse,
+            response_model=QueueItemResponse,
             status_code=201,
-            summary="Order a backtest",
+            summary="Put backtest into queue",
         )
-        async def create_backtest(
-            body: BacktestCreateRequest,
+        async def add_backtest(
+            body: BacktestRequest,
             db: AsyncSession = Depends(get_db),
-        ) -> BacktestCreateResponse:
-            job = await job_service.create_job(
-                db,
-                params=body.params,
-                owner=body.owner_address,
+        ) -> QueueItemResponse:
+            queue_payload = QueueCreate(
+                base_asset=body.base_asset,
+                quote_asset=body.quote_asset,
+                period_start=body.period_start,
+                period_end=body.period_end,
+                base_balance_start=body.base_balance_start,
+                quote_balance_start=body.quote_balance_start,
+                priority_usdc=body.priority_usdc,
+                creator_address=body.creator_address,
             )
-            return BacktestCreateResponse(
-                job_id=job.id,
-                status=job.status.value,
-            )
-
-        @self.app.post(
-            "/create",
-            response_model=BacktestCreateResponse,
-            status_code=201,
-            summary="Create backtest with required strategy fields",
-        )
-        async def create(
-            body: CreateBacktestRequest,
-            db: AsyncSession = Depends(get_db),
-        ) -> BacktestCreateResponse:
-            params = {
-                "start_time": body.start_time.isoformat(),
-                "end_time": body.end_time.isoformat(),
-                "symbol": body.symbol,
-                "base_asset": body.base_asset,
-                "quote_asset": body.quote_asset,
-            }
-            job = await job_service.create_job(db, params=params)
-            return BacktestCreateResponse(job_id=job.id, status=job.status.value)
+            return await enqueue_backtest(db, queue_payload)
 
         @self.app.get(
-            "/jobs/{job_id}",
-            response_model=JobStatusResponse,
-            summary="Check job status",
-            description=(
-                "Poll this endpoint after payment to track progress. "
-                "When status is 'done', the result field contains backtest output."
-            ),
+            "/queue",
+            response_model=list[QueueItemResponse],
+            summary="List queue sorted by priority and FIFO",
         )
-        async def get_job_status(
-            job_id: str,
+        async def get_queue(
+            limit: int = 100,
+            status: QueueStatus | None = None,
             db: AsyncSession = Depends(get_db),
-        ) -> JobStatusResponse:
-            job = await job_service.get_job(db, job_id)
-            if job is None:
-                raise HTTPException(status_code=404, detail="Job not found")
+        ) -> list[QueueItemResponse]:
+            if limit < 1 or limit > 1000:
+                raise HTTPException(status_code=400, detail="limit should be in range [1, 1000]")
+            return await list_queue(db, limit=limit, status=status)
 
-            return JobStatusResponse(
-                job_id=job.id,
-                status=job.status.value,
-                created_at=job.created_at,
-                updated_at=job.updated_at,
-                result=job.result if job.status.value == "done" else None,
-                error_message=job.error_message if job.status.value == "failed" else None,
-                payment_tx_hash=job.payment_tx_hash,
-            )
+        @self.app.post(
+            "/queue/next",
+            response_model=QueueItemResponse,
+            summary="Get next backtest by priority and FIFO",
+        )
+        async def get_next_queue_item(db: AsyncSession = Depends(get_db)) -> QueueItemResponse:
+            item = await pop_next_backtest(db)
+            if item is None:
+                raise HTTPException(status_code=404, detail="No pending backtests in queue")
+            return item
+
+        @self.app.patch(
+            "/queue/{queue_id}/status",
+            response_model=QueueItemResponse,
+            summary="Update queue item status",
+        )
+        async def patch_queue_status(
+            queue_id: str,
+            body: QueueStatusUpdate,
+            db: AsyncSession = Depends(get_db),
+        ) -> QueueItemResponse:
+            item = await update_queue_status(db, queue_id, body.status)
+            if item is None:
+                raise HTTPException(status_code=404, detail="Queue item not found")
+            return item
+
+        @self.app.post(
+            "/history",
+            response_model=HistoryItemResponse,
+            status_code=201,
+            summary="Add completed backtest history record",
+        )
+        async def create_history_item(
+            body: HistoryCreate,
+            db: AsyncSession = Depends(get_db),
+        ) -> HistoryItemResponse:
+            return await add_history_record(db, body)
+
+        @self.app.get(
+            "/history",
+            response_model=list[HistoryItemResponse],
+            summary="List backtest history",
+        )
+        async def get_history(limit: int = 100, db: AsyncSession = Depends(get_db)) -> list[HistoryItemResponse]:
+            if limit < 1 or limit > 1000:
+                raise HTTPException(status_code=400, detail="limit should be in range [1, 1000]")
+            return await list_history(db, limit=limit)
 
         @self.app.get("/health", tags=["infra"])
         async def health() -> dict:
@@ -175,4 +208,4 @@ app = service.app
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)

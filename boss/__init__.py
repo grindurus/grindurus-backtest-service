@@ -1,3 +1,3 @@
-from boss.https_adapter import BossHttpsAdapter
+from boss.BossClient import BossClient
 
-__all__ = ["BossHttpsAdapter"]
+__all__ = ["BossClient"]

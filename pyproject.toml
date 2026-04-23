@@ -1,3 +1,5 @@
+# pyproject.toml
+
 [project]
 name = "backtest-service"
 version = "0.1.0"
@@ -13,7 +15,7 @@ dependencies = [
     "alembic>=1.14,<2",
     "pydantic>=2.0,<3",
     "pydantic-settings>=2.0,<3",
-    "httpx>=0.27,<1",              # async HTTP client (callbacks, external APIs)
+    "httpx>=0.28.1,<1",            # async HTTP (BossClient)
     "python-ulid>=2,<4",          # time-sortable unique IDs for jobs
 ]
 
@@ -25,7 +27,8 @@ dev = [
     "ruff>=0.6,<1",
 ]
 
-
 [build-system]
 requires = ["setuptools>=68"]
-build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.setuptools]
+packages = ["db", "boss"]

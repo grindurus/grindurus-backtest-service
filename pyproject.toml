@@ -17,6 +17,10 @@ dependencies = [
     "pydantic-settings>=2.0,<3",
     "httpx>=0.28.1,<1",            # async HTTP (BossClient)
     "python-ulid>=2,<4",          # time-sortable unique IDs for jobs
+    "x402[fastapi,evm,svm]==2.8.0",
+    # x402[svm] should pull these; pin explicitly so Docker images always get Solana deps.
+    "solders>=0.27,<1",
+    "solana>=0.36,<1",
 ]
 
 [project.optional-dependencies]

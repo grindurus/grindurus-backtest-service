@@ -1,5 +1,6 @@
 # docker-compose.dev.yml
 # $ docker compose -f docker-compose.dev.yml up -d --build
+# $ docker compose -f docker-compose.dev.yml cp api:/usr/local/lib/python3.13/site-packages ./_site_packages_dump/site-packages
 
 version: "3.9"
 
@@ -28,7 +29,7 @@ services:
     container_name: backtest-api-dev
     environment:
       DATABASE_URL: postgresql+asyncpg://backtest:backtest@db:5432/backtest
-      APP_MODE: dev
+      X402_API_KEY: ${X402_API_KEY}
     depends_on:
       db:
         condition: service_healthy

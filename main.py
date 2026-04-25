@@ -2,8 +2,10 @@
 
 import logging
 import json
+import asyncio
+from contextlib import suppress
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 from datetime import datetime
 from decimal import Decimal
 
@@ -23,10 +25,12 @@ from x402.http import (
 from x402.http.middleware.fastapi import PaymentMiddlewareASGI
 from x402.http.types import RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
+from x402.mechanisms.evm.utils import get_network_config
 from x402.mechanisms.svm.exact import ExactSvmServerScheme
 from x402.server import x402ResourceServer
 
-from db.database import get_db, init_db
+from payments import KirapayMiddlewareASGI, PromocodeMiddlewareASGI
+from db.database import SessionLocal, get_db, init_db
 from db.models import QueueStatus
 from db.schemas import (
     HistoryCreate,
@@ -38,6 +42,7 @@ from db.schemas import (
 from db.service import (
     add_history_record,
     enqueue_backtest,
+    increase_queue_priority,
     list_queue,
     list_history,
     pop_next_backtest,
@@ -81,6 +86,14 @@ class X402Middleware:
             request: Request,
             call_next: Callable[[Request], Awaitable[Response]],
         ) -> Response:
+            if request.method == "POST":
+                method = (
+                    getattr(request.state, "payment_method", None)
+                    or request.headers.get("x-payment-method")
+                    or "x402"
+                )
+                if str(method).strip().lower() != "x402":
+                    return await call_next(request)
             try:
                 return await super().dispatch(request, call_next)
             except Exception as exc:
@@ -107,6 +120,15 @@ class X402Middleware:
         return s if (s := value.strip()).startswith("$") else f"${s}"
 
     @staticmethod
+    def _evm_supports_usdc_default(network: str) -> bool:
+        try:
+            config = get_network_config(network)
+        except ValueError:
+            return False
+        asset = config.get("default_asset")
+        return bool(asset and asset.get("address"))
+
+    @staticmethod
     def _build_facilitator_config() -> FacilitatorConfig:
         api_key = settings.x402_api_key.strip()
         if not api_key:
@@ -129,12 +151,7 @@ class X402Middleware:
             auth_provider=_ApiKeyAuthProvider(),
         )
 
-    def setup(
-        self,
-        app: FastAPI,
-        before_settle_hook: Callable[[Any], Any] | None = None,
-        after_settle_hook: Callable[[Any], Any] | None = None,
-    ) -> None:
+    def setup(self, app: FastAPI) -> None:
         facilitator = HTTPFacilitatorClient(self._build_facilitator_config())
         server = x402ResourceServer(facilitator)
         supported = facilitator.get_supported()
@@ -159,35 +176,43 @@ class X402Middleware:
         )
 
         price = self._normalize_price(settings.backtest_price)
-        accepts = []
-        # accepts: list[PaymentOption] = [
-        #     PaymentOption(
-        #         scheme="exact",
-        #         pay_to=settings.evm_payment_address,
-        #         price=price,
-        #         network=evm_network,
-        #     )
-        #     for evm_network in registered_evm
-        # ]
-        # accepts.extend(
-        #     PaymentOption(
-        #         scheme="exact",
-        #         pay_to=settings.svm_payment_addess,
-        #         price=price,
-        #         network=svm_network,
-        #     )
-        #     for svm_network in registered_svm
-        # )
+        evm_payable = [n for n in registered_evm if self._evm_supports_usdc_default(n)]
+        skipped_evm = sorted(set(registered_evm) - set(evm_payable))
+        if skipped_evm:
+            logging.warning(
+                "Skipping EVM networks without default stablecoin for $ price: %s",
+                skipped_evm,
+            )
+
+        accepts: list[PaymentOption] = [
+            PaymentOption(
+                scheme="exact",
+                pay_to=settings.evm_payment_address,
+                price=price,
+                network=evm_network,
+            )
+            for evm_network in evm_payable
+        ]
+        accepts.extend(
+            PaymentOption(
+                scheme="exact",
+                pay_to=settings.svm_payment_addess,
+                price=price,
+                network=svm_network,
+            )
+            for svm_network in registered_svm
+        )
         if not accepts:
+            fallback_network = settings.x402_network if self._evm_supports_usdc_default(settings.x402_network) else "eip155:8453"
             accepts = [
                 PaymentOption(
                     scheme="exact",
                     pay_to=settings.evm_payment_address,
                     price=price,
-                    network=settings.x402_network,
+                    network=fallback_network,
                 )
             ]
-
+        logging.info(f'accepts: {accepts}')
         routes: dict[str, RouteConfig] = {
             "POST /backtest": RouteConfig(
                 accepts=accepts,
@@ -196,11 +221,6 @@ class X402Middleware:
             ),
         }
 
-        if before_settle_hook is not None:
-            server.on_before_settle(before_settle_hook)
-        if after_settle_hook is not None:
-            server.on_after_settle(after_settle_hook)
-
         app.add_middleware(self.SafePaymentMiddlewareASGI, routes=routes, server=server)
         app.state.x402_supported_networks = [*registered_evm, *registered_svm]
         app.state.x402_network = settings.x402_network
@@ -208,6 +228,8 @@ class X402Middleware:
 
 
 class BacktestService:
+    SUPPORTED_PAYMENT_METHODS = {"x402", "kirapay", "promocode"}
+
     def __init__(self) -> None:
         self.app = FastAPI(
             title="Backtest API",
@@ -215,15 +237,33 @@ class BacktestService:
             version="0.1.0",
             docs_url="/docs",
         )
+        self._priority_update_queue: asyncio.Queue[tuple[str, Decimal]] = asyncio.Queue()
+        self._priority_worker: asyncio.Task | None = None
         self._setup_middlewares()
         self._setup_routes()
 
     def _setup_middlewares(self) -> None:
-        X402Middleware().setup(
-            self.app,
-            before_settle_hook=self._before_payment_hook,
-            after_settle_hook=self._after_payment_hook,
-        )
+        @self.app.middleware("http")
+        async def payment_method_dispatcher(request: Request, call_next):
+            if request.method == "POST":
+                method = (request.headers.get("x-payment-method") or "").strip().lower()
+                if not method:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": "Missing X-Payment-Method header"},
+                    )
+                if method not in self.SUPPORTED_PAYMENT_METHODS:
+                    return JSONResponse(
+                        status_code=501,
+                        content={"error": f"Payment method '{method}' is not enabled"},
+                    )
+                request.state.payment_method = method
+
+            return await call_next(request)
+
+        self.app.add_middleware(KirapayMiddlewareASGI)
+        self.app.add_middleware(PromocodeMiddlewareASGI)
+        X402Middleware().setup(self.app)
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=["http://localhost:3001", "http://127.0.0.1:3001", "https://app.grindurus.xyz"],
@@ -237,12 +277,43 @@ class BacktestService:
         async def _startup_init_db() -> None:
             await init_db()
             logging.info("Database schema ensured")
+            self._priority_worker = asyncio.create_task(self._priority_update_task())
+
+        @self.app.on_event("shutdown")
+        async def _shutdown_priority_worker() -> None:
+            if self._priority_worker is None:
+                return
+            self._priority_worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._priority_worker
+            self._priority_worker = None
 
     async def _before_payment_hook(self, context: Any) -> None:
         logging.info(f"x402 before_payment: ctx={context}")
 
     async def _after_payment_hook(self, context: Any) -> None:
         logging.info(f"x402 after_payment: ctx={context}")
+
+    async def _priority_update_task(self) -> None:
+        while True:
+            backtest_id, delta = await self._priority_update_queue.get()
+            try:
+                delta_usdc = Decimal(str(delta))
+                async with SessionLocal() as db:
+                    updated = await increase_queue_priority(db, backtest_id, delta_usdc)
+                if updated is None:
+                    logging.warning("priority worker: queue_id=%s not found", backtest_id)
+                else:
+                    logging.info(
+                        "priority worker: queue_id=%s delta=%s new_priority=%s",
+                        backtest_id,
+                        delta_usdc,
+                        updated.priority_usdc,
+                    )
+            except Exception:
+                logging.exception("priority worker: failed for queue_id=%s delta=%s", backtest_id, delta)
+            finally:
+                self._priority_update_queue.task_done()
 
     def _setup_routes(self) -> None:
         class BacktestRequest(BaseModel):
@@ -320,10 +391,13 @@ class BacktestService:
                 period_end=body.period_end,
                 base_balance_start=body.base_balance_start,
                 quote_balance_start=body.quote_balance_start,
-                priority_usdc=body.priority_usdc,
+                priority_usdc=Decimal("0"),
                 creator_address=body.creator_address,
             )
-            return await enqueue_backtest(db, queue_payload)
+            item = await enqueue_backtest(db, queue_payload)
+            logging.info("priority queued: queue_id=%s delta=%s", item.id, body.priority_usdc)
+            await self._priority_update_queue.put((item.id, body.priority_usdc))
+            return item
 
         @self.app.get(
             "/queue",
@@ -333,11 +407,19 @@ class BacktestService:
         async def get_queue(
             limit: int = 100,
             status: QueueStatus | None = None,
+            sort_by: Literal["priority", "created_at"] = "priority",
+            sort_order: Literal["asc", "desc"] = "asc",
             db: AsyncSession = Depends(get_db),
         ) -> list[QueueItemResponse]:
             if limit < 1 or limit > 1000:
                 raise HTTPException(status_code=400, detail="limit should be in range [1, 1000]")
-            return await list_queue(db, limit=limit, status=status)
+            return await list_queue(
+                db,
+                limit=limit,
+                status=status,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
 
         @self.app.post(
             "/queue/next",

@@ -1,35 +1,21 @@
 # $ python3 main.py
 
 import logging
-import json
 import asyncio
 from contextlib import suppress
-from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import FastAPI, Depends, HTTPException, Request, Response
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
-from x402.http import (
-    AuthHeaders,
-    AuthProvider,
-    FacilitatorConfig,
-    HTTPFacilitatorClient,
-    PaymentOption,
-)
-from x402.http.middleware.fastapi import PaymentMiddlewareASGI
-from x402.http.types import RouteConfig
-from x402.mechanisms.evm.exact import ExactEvmServerScheme
-from x402.mechanisms.evm.utils import get_network_config
-from x402.mechanisms.svm.exact import ExactSvmServerScheme
-from x402.server import x402ResourceServer
-
-from payments import KirapayMiddlewareASGI, PromocodeMiddlewareASGI
+from payments.kirapay_middleware import KirapayMiddlewareASGI
+from payments.promocode_middleware import PromocodeMiddlewareASGI
+from payments.x402_middleware import X402Middleware
 from db.database import SessionLocal, get_db, init_db
 from db.models import QueueStatus
 from db.schemas import (
@@ -48,183 +34,11 @@ from db.service import (
     pop_next_backtest,
     update_queue_status,
 )
-from db.settings import settings
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)-30s %(levelname)-8s %(message)s",
 )
-
-
-class X402Middleware:
-    class SafePaymentMiddlewareASGI(PaymentMiddlewareASGI):
-        @staticmethod
-        def _build_verify_error_response(message: str) -> JSONResponse | None:
-            if "Facilitator verify failed" not in message:
-                return None
-
-            details: dict = {}
-            if ": " in message:
-                maybe_json = message.split(": ", 1)[1]
-                try:
-                    parsed = json.loads(maybe_json)
-                    if isinstance(parsed, dict):
-                        details = parsed
-                except json.JSONDecodeError:
-                    details = {}
-
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": details.get("invalidReason", message),
-                    "details": details or {"raw": message},
-                },
-            )
-
-        async def dispatch(
-            self,
-            request: Request,
-            call_next: Callable[[Request], Awaitable[Response]],
-        ) -> Response:
-            if request.method == "POST":
-                method = (
-                    getattr(request.state, "payment_method", None)
-                    or request.headers.get("x-payment-method")
-                    or "x402"
-                )
-                if str(method).strip().lower() != "x402":
-                    return await call_next(request)
-            try:
-                return await super().dispatch(request, call_next)
-            except Exception as exc:
-                stack = [exc]
-                while stack:
-                    cur = stack.pop()
-                    response = self._build_verify_error_response(str(cur))
-                    if response is not None:
-                        return response
-
-                    nested = getattr(cur, "exceptions", None)
-                    if nested:
-                        stack.extend(nested)
-                    cause = getattr(cur, "__cause__", None)
-                    if cause is not None:
-                        stack.append(cause)
-                    context = getattr(cur, "__context__", None)
-                    if context is not None:
-                        stack.append(context)
-                raise
-
-    @staticmethod
-    def _normalize_price(value: str) -> str:
-        return s if (s := value.strip()).startswith("$") else f"${s}"
-
-    @staticmethod
-    def _evm_supports_usdc_default(network: str) -> bool:
-        try:
-            config = get_network_config(network)
-        except ValueError:
-            return False
-        asset = config.get("default_asset")
-        return bool(asset and asset.get("address"))
-
-    @staticmethod
-    def _build_facilitator_config() -> FacilitatorConfig:
-        api_key = settings.x402_api_key.strip()
-        if not api_key:
-            return FacilitatorConfig(url=settings.x402_facilitator_url)
-
-        class _ApiKeyAuthProvider(AuthProvider):
-            def get_auth_headers(self) -> AuthHeaders:
-                protected = {
-                    "Authorization": f"Bearer {api_key}",
-                    "X-API-Key": api_key,
-                }
-                return AuthHeaders(
-                    verify=protected,
-                    settle=protected,
-                    supported={"X-API-Key": api_key},
-                )
-
-        return FacilitatorConfig(
-            url=settings.x402_facilitator_url,
-            auth_provider=_ApiKeyAuthProvider(),
-        )
-
-    def setup(self, app: FastAPI) -> None:
-        facilitator = HTTPFacilitatorClient(self._build_facilitator_config())
-        server = x402ResourceServer(facilitator)
-        supported = facilitator.get_supported()
-
-        registered_evm: list[str] = []
-        registered_svm: list[str] = []
-        for kind in supported.kinds:
-            if kind.x402_version != 2 or kind.scheme != "exact":
-                continue
-            net = kind.network
-            if net.startswith("eip155:"):
-                server.register(net, ExactEvmServerScheme())
-                registered_evm.append(net)
-            elif net.startswith("solana:"):
-                server.register(net, ExactSvmServerScheme())
-                registered_svm.append(net)
-
-        logging.info(
-            "x402 v2/exact schemes registered: evm=%s svm=%s",
-            registered_evm,
-            registered_svm,
-        )
-
-        price = self._normalize_price(settings.backtest_price)
-        evm_payable = [n for n in registered_evm if self._evm_supports_usdc_default(n)]
-        skipped_evm = sorted(set(registered_evm) - set(evm_payable))
-        if skipped_evm:
-            logging.warning(
-                "Skipping EVM networks without default stablecoin for $ price: %s",
-                skipped_evm,
-            )
-
-        accepts: list[PaymentOption] = [
-            PaymentOption(
-                scheme="exact",
-                pay_to=settings.evm_payment_address,
-                price=price,
-                network=evm_network,
-            )
-            for evm_network in evm_payable
-        ]
-        accepts.extend(
-            PaymentOption(
-                scheme="exact",
-                pay_to=settings.svm_payment_addess,
-                price=price,
-                network=svm_network,
-            )
-            for svm_network in registered_svm
-        )
-        if not accepts:
-            fallback_network = settings.x402_network if self._evm_supports_usdc_default(settings.x402_network) else "eip155:8453"
-            accepts = [
-                PaymentOption(
-                    scheme="exact",
-                    pay_to=settings.evm_payment_address,
-                    price=price,
-                    network=fallback_network,
-                )
-            ]
-        logging.info(f'accepts: {accepts}')
-        routes: dict[str, RouteConfig] = {
-            "POST /backtest": RouteConfig(
-                accepts=accepts,
-                mime_type="application/json",
-                description="Create a backtest job in queue",
-            ),
-        }
-
-        app.add_middleware(self.SafePaymentMiddlewareASGI, routes=routes, server=server)
-        app.state.x402_supported_networks = [*registered_evm, *registered_svm]
-        app.state.x402_network = settings.x402_network
-        app.state.x402_registered = {"evm": registered_evm, "svm": registered_svm}
 
 
 class BacktestService:
@@ -374,6 +188,9 @@ class BacktestService:
                     raise ValueError(f"Missing required fields: {', '.join(missing_fields)}")
                 return self
 
+        class BidRequest(BaseModel):
+            amount_usdc: Decimal
+
         @self.app.post(
             "/backtest",
             response_model=QueueItemResponse,
@@ -398,6 +215,25 @@ class BacktestService:
             logging.info("priority queued: queue_id=%s delta=%s", item.id, body.priority_usdc)
             await self._priority_update_queue.put((item.id, body.priority_usdc))
             return item
+
+        @self.app.post(
+            "/backtest/{queue_id}/bid",
+            response_model=QueueItemResponse,
+            summary="Increase queue priority via paid bid",
+        )
+        async def bid_backtest(
+            queue_id: str,
+            body: BidRequest,
+            db: AsyncSession = Depends(get_db),
+        ) -> QueueItemResponse:
+            amount = Decimal(str(body.amount_usdc))
+            if amount <= 0:
+                raise HTTPException(status_code=400, detail="amount_usdc must be greater than zero")
+            updated = await increase_queue_priority(db, queue_id, amount)
+            if updated is None:
+                raise HTTPException(status_code=404, detail="Queue item not found")
+            logging.info("bid accepted: queue_id=%s delta=%s new_priority=%s", queue_id, amount, updated.priority_usdc)
+            return updated
 
         @self.app.get(
             "/queue",

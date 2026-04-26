@@ -1,4 +1,1 @@
-from .kirapay_middleware import KirapayMiddlewareASGI
-from .promocode_middleware import PromocodeMiddlewareASGI
-
-__all__ = ["KirapayMiddlewareASGI", "PromocodeMiddlewareASGI"]
+"""Payment-related helpers and middleware (avoid heavy imports at package import)."""

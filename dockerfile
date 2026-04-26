@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 COPY . .
 
-RUN pip install --no-cache-dir .
+RUN pip install -e .
 
 EXPOSE 8001
 

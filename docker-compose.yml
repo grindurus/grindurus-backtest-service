@@ -30,7 +30,9 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://backtest:backtest@db:5432/backtest
-      APP_MODE: prod
+      X_ADMIN_KEY: ${X_ADMIN_KEY}
+      X402_API_KEY: ${X402_API_KEY}
+      X402_API_SECRET: ${X402_API_SECRET}
     depends_on:
       db:
         condition: service_healthy

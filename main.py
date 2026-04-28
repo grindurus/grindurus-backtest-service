@@ -7,7 +7,7 @@ from typing import Any, Literal
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,18 +16,23 @@ from starlette.responses import JSONResponse
 from payments.kirapay_middleware import KirapayMiddlewareASGI
 from payments.promocode_middleware import PromocodeMiddlewareASGI
 from payments.x402_middleware import X402Middleware
+from settings import settings
 from db.database import SessionLocal, get_db, init_db
 from db.models import QueueStatus
 from db.schemas import (
     HistoryCreate,
     HistoryItemResponse,
+    PromoCodeAdminResponse,
+    PromoCodeSetRequest,
     QueueCreate,
     QueueItemResponse,
     QueueStatusUpdate,
 )
-from db.service import (
+from db.queries import (
     add_history_record,
     enqueue_backtest,
+    list_promocodes,
+    set_promocode_uses,
     increase_queue_priority,
     list_queue,
     list_history,
@@ -130,6 +135,13 @@ class BacktestService:
                 self._priority_update_queue.task_done()
 
     def _setup_routes(self) -> None:
+        async def require_admin(x_admin_key: str | None = Header(default=None, alias="X-Admin-Key")) -> None:
+            expected = settings.x_admin_key.strip()
+            if not expected:
+                raise HTTPException(status_code=503, detail="Admin API is not configured")
+            if x_admin_key != expected:
+                raise HTTPException(status_code=403, detail="Forbidden")
+
         class BacktestRequest(BaseModel):
             # New flat format.
             base_asset: str | None = None
@@ -308,6 +320,42 @@ class BacktestService:
         @self.app.get("/health", tags=["infra"])
         async def health() -> dict:
             return {"status": "ok"}
+
+        #################### ADMIN ####################
+
+        @self.app.get(
+            "/admin/promocodes",
+            response_model=list[PromoCodeAdminResponse],
+            tags=["admin"],
+            summary="List promocodes",
+            dependencies=[Depends(require_admin)],
+        )
+        async def admin_list_promocodes(
+            limit: int = 100,
+            db: AsyncSession = Depends(get_db),
+        ) -> list[PromoCodeAdminResponse]:
+            if limit < 1 or limit > 1000:
+                raise HTTPException(status_code=400, detail="limit should be in range [1, 1000]")
+            return await list_promocodes(db, limit=limit)
+
+        @self.app.put(
+            "/admin/promocodes/{code}",
+            response_model=PromoCodeAdminResponse,
+            tags=["admin"],
+            summary="Set promocode remaining uses",
+            dependencies=[Depends(require_admin)],
+        )
+        async def admin_set_promocode(
+            code: str,
+            body: PromoCodeSetRequest,
+            db: AsyncSession = Depends(get_db),
+        ) -> PromoCodeAdminResponse:
+            return await set_promocode_uses(
+                db,
+                code=code,
+                remaining_uses=body.remaining_uses,
+                is_active=body.is_active,
+            )
 
 
 service = BacktestService()

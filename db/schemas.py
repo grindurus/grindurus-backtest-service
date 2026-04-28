@@ -68,3 +68,21 @@ class HistoryItemResponse(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PromoCodeAdminResponse(BaseModel):
+    code: str
+    remaining_uses: int
+    is_active: bool
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PromoCodeTopUpRequest(BaseModel):
+    amount: int = Field(ge=1, description="How many uses to add")
+
+
+class PromoCodeSetRequest(BaseModel):
+    remaining_uses: int = Field(ge=0, description="Absolute remaining uses value")
+    is_active: bool = True

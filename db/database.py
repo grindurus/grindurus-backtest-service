@@ -4,7 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker, create_async_engine
 
 from .models import Base
-from .settings import settings
+from settings import settings
 
 engine = create_async_engine(settings.database_url, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -34,6 +34,27 @@ async def _run_compat_migrations(conn: AsyncConnection) -> None:
                 END IF;
             END
             $$;
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS promocodes (
+                code VARCHAR(64) PRIMARY KEY,
+                remaining_uses INTEGER NOT NULL DEFAULT 0,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            INSERT INTO promocodes (code, remaining_uses, is_active)
+            VALUES ('GRINDURUS', 100, TRUE)
+            ON CONFLICT (code) DO NOTHING
             """
         )
     )

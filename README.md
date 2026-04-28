@@ -31,7 +31,10 @@ Environment variables (optional `.env`; see `db/settings.py`):
 |----------|----------------|--------|
 | `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/backtests` | Must match your Postgres user, password, host, and database |
 | `APP_MODE` | `dev` | Informational; compose sets `dev` / `prod` |
-| `PAYMENT_WALLET_ADDRESS`, `BACKTEST_PRICE` | defaults in settings | Used by related billing/config code paths |
+| `PAYMENT_WALLET_ADDRESS` | `0x...` from settings | Receiver wallet for x402 payments |
+| `BACKTEST_PRICE` | `$1.00` | x402 price for `POST /backtest` (must include `$`; auto-normalized if omitted) |
+| `X402_FACILITATOR_URL` | `https://x402.org/facilitator` | x402 facilitator URL (use CDP URL for production) |
+| `X402_NETWORK` | `eip155:84532` | x402 CAIP-2 network id (Base Sepolia by default) |
 
 ## Run without Docker
 

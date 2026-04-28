@@ -1,10 +1,11 @@
 from decimal import Decimal
+from enum import Enum
 from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import BacktestQueue, BacktestsHistory, QueueStatus
+from .models import BacktestQueue, BacktestsHistory, PromoCode, QueueStatus
 from .schemas import HistoryCreate, QueueCreate
 
 
@@ -94,3 +95,64 @@ async def list_history(db: AsyncSession, limit: int = 100) -> list[BacktestsHist
     query = select(BacktestsHistory).order_by(BacktestsHistory.created_at.desc()).limit(limit)
     result = await db.execute(query)
     return list(result.scalars().all())
+
+
+class PromoCodeConsumeResult(str, Enum):
+    accepted = "accepted"
+    invalid = "invalid"
+    exhausted = "exhausted"
+
+
+async def consume_promocode(db: AsyncSession, code: str) -> tuple[PromoCodeConsumeResult, int | None]:
+    normalized = code.strip().upper()
+    item = await db.get(PromoCode, normalized, with_for_update=True)
+    if item is None or not item.is_active:
+        await db.rollback()
+        return PromoCodeConsumeResult.invalid, None
+    if item.remaining_uses <= 0:
+        await db.rollback()
+        return PromoCodeConsumeResult.exhausted, 0
+
+    item.remaining_uses -= 1
+    await db.commit()
+    await db.refresh(item)
+    return PromoCodeConsumeResult.accepted, item.remaining_uses
+
+
+async def get_promocode(db: AsyncSession, code: str) -> PromoCode | None:
+    normalized = code.strip().upper()
+    return await db.get(PromoCode, normalized)
+
+
+async def add_promocode_uses(db: AsyncSession, code: str, amount: int) -> PromoCode:
+    normalized = code.strip().upper()
+    item = await db.get(PromoCode, normalized, with_for_update=True)
+    if item is None:
+        item = PromoCode(code=normalized, remaining_uses=amount, is_active=True)
+        db.add(item)
+    else:
+        item.remaining_uses += amount
+        item.is_active = True
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+async def list_promocodes(db: AsyncSession, limit: int = 100) -> list[PromoCode]:
+    query = select(PromoCode).order_by(PromoCode.created_at.desc()).limit(limit)
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+async def set_promocode_uses(db: AsyncSession, code: str, remaining_uses: int, is_active: bool = True) -> PromoCode:
+    normalized = code.strip().upper()
+    item = await db.get(PromoCode, normalized, with_for_update=True)
+    if item is None:
+        item = PromoCode(code=normalized, remaining_uses=remaining_uses, is_active=is_active)
+        db.add(item)
+    else:
+        item.remaining_uses = remaining_uses
+        item.is_active = is_active
+    await db.commit()
+    await db.refresh(item)
+    return item

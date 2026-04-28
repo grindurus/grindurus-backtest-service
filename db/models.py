@@ -5,7 +5,7 @@ from decimal import Decimal
 from random import choices
 from string import ascii_uppercase, digits
 
-from sqlalchemy import DateTime, Enum, Numeric, String, Text, func
+from sqlalchemy import Boolean, DateTime, Enum, Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -64,6 +64,17 @@ class BacktestQueue(Base):
         default=QueueStatus.pending,
         server_default=QueueStatus.pending.value,
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PromoCode(Base):
+    __tablename__ = "promocodes"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    remaining_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

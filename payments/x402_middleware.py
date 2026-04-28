@@ -39,7 +39,7 @@ from x402.mechanisms.evm.utils import get_network_config
 from x402.mechanisms.svm.exact import ExactSvmServerScheme
 from x402.server import x402ResourceServer
 
-from db.settings import settings
+from settings import settings
 
 
 class X402Middleware:
@@ -332,8 +332,8 @@ class X402Middleware:
         )
         if not accepts:
             fallback_network = (
-                settings.x402_network
-                if self._evm_supports_usdc_default(settings.x402_network)
+                settings.x402_network_fallback
+                if self._evm_supports_usdc_default(settings.x402_network_fallback)
                 else "eip155:8453"
             )
             accepts = [
@@ -371,5 +371,5 @@ class X402Middleware:
 
         app.add_middleware(self.SafePaymentMiddlewareASGI, routes=routes, server=server)
         app.state.x402_supported_networks = [*registered_evm, *registered_svm]
-        app.state.x402_network = settings.x402_network
+        app.state.x402_network_fallback = settings.x402_network_fallback
         app.state.x402_registered = {"evm": registered_evm, "svm": registered_svm}

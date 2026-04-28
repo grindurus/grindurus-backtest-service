@@ -107,12 +107,6 @@ class BacktestService:
                 await self._priority_worker
             self._priority_worker = None
 
-    async def _before_payment_hook(self, context: Any) -> None:
-        logging.info(f"x402 before_payment: ctx={context}")
-
-    async def _after_payment_hook(self, context: Any) -> None:
-        logging.info(f"x402 after_payment: ctx={context}")
-
     async def _priority_update_task(self) -> None:
         while True:
             backtest_id, delta = await self._priority_update_queue.get()

@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     # PayAI merchant: API Key ID (kid) + PKCS#8 secret (payai_sk_...); see PayAI facilitator auth.
     x402_network_fallback: str = "eip155:8453"
     x_admin_key: str = ""
+    klines_service_url: str = "https://klines.grindurus.xyz"
+    klines_exchange: str = "binance"
+    klines_timeout_seconds: float = 10.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -47,13 +47,9 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=grindurus
-      # --- localhost ---
-      - traefik.http.routers.backtest-api-localhost.rule=Host(`backtest.localhost`)
-      - traefik.http.routers.backtest-api-localhost.tls=true
-      - traefik.http.routers.backtest-api-localhost.entrypoints=websecure
 
-      # --- prod ---
-      - traefik.http.routers.backtest-api.rule=Host(`backtest.grindurus.xyz`)
+      # --- prod HTTP → HTTPS redirect ---
+      - traefik.http.routers.backtest-api.rule=Host(`backtest.${DOMAIN:-localhost}`)
       - traefik.http.routers.backtest-api.tls.certresolver=le
       - traefik.http.routers.backtest-api.entrypoints=websecure
 

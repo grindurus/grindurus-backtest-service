@@ -7,6 +7,7 @@ from typing import Any, Literal
 from datetime import datetime
 from decimal import Decimal
 
+import httpx
 from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, model_validator
@@ -16,6 +17,7 @@ from starlette.responses import JSONResponse
 from payments.kirapay_middleware import KirapayMiddlewareASGI
 from payments.promocode_middleware import PromocodeMiddlewareASGI
 from payments.x402_middleware import X402Middleware
+from clients.klines_client import KlinesClient
 from settings import settings
 from db.database import SessionLocal, get_db, init_db
 from db.models import QueueStatus
@@ -55,6 +57,10 @@ class BacktestService:
             summary="Backtests queue and history service",
             version="0.1.0",
             docs_url="/docs",
+        )
+        self.klines_client = KlinesClient(
+            base_url=settings.klines_service_url,
+            timeout_seconds=settings.klines_timeout_seconds,
         )
         self._priority_update_queue: asyncio.Queue[tuple[str, Decimal]] = asyncio.Queue()
         self._priority_worker: asyncio.Task | None = None
@@ -197,6 +203,10 @@ class BacktestService:
         class BidRequest(BaseModel):
             amount_usdc: Decimal
 
+        class SymbolsResponse(BaseModel):
+            base_assets: list[str]
+            quote_assets: list[str]
+
         @self.app.post(
             "/backtest",
             response_model=QueueItemResponse,
@@ -207,6 +217,8 @@ class BacktestService:
             body: BacktestRequest,
             db: AsyncSession = Depends(get_db),
         ) -> QueueItemResponse:
+            payment_method = (body.payment_method or "").strip().lower()
+            priority_delta = Decimal("0") if payment_method == "promocode" else body.priority_usdc
             queue_payload = QueueCreate(
                 base_asset=body.base_asset,
                 quote_asset=body.quote_asset,
@@ -218,8 +230,16 @@ class BacktestService:
                 creator_address=body.creator_address,
             )
             item = await enqueue_backtest(db, queue_payload)
-            logging.info("priority queued: queue_id=%s delta=%s", item.id, body.priority_usdc)
-            await self._priority_update_queue.put((item.id, body.priority_usdc))
+            if priority_delta > 0:
+                logging.info("priority queued: queue_id=%s delta=%s", item.id, priority_delta)
+                await self._priority_update_queue.put((item.id, priority_delta))
+            else:
+                logging.info(
+                    "priority skipped: queue_id=%s payment_method=%s delta=%s",
+                    item.id,
+                    payment_method or "unknown",
+                    priority_delta,
+                )
             return item
 
         @self.app.post(
@@ -240,6 +260,27 @@ class BacktestService:
                 raise HTTPException(status_code=404, detail="Queue item not found")
             logging.info("bid accepted: queue_id=%s delta=%s new_priority=%s", queue_id, amount, updated.priority_usdc)
             return updated
+
+        @self.app.get(
+            "/symbols",
+            response_model=SymbolsResponse,
+            summary="List supported base and quote assets",
+        )
+        async def get_symbols(exchange: str = settings.klines_exchange) -> SymbolsResponse:
+            try:
+                symbols_map = await self.klines_client.get_available_symbols(exchange=exchange)
+            except (httpx.HTTPError, ValueError) as exc:
+                logging.exception("Failed to fetch symbols from klines service")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Unable to fetch symbols from klines service: {exc}",
+                ) from exc
+
+            quote_assets = sorted({quote for quotes in symbols_map.values() for quote in quotes})
+            return SymbolsResponse(
+                base_assets=sorted(symbols_map.keys()),
+                quote_assets=quote_assets,
+            )
 
         @self.app.get(
             "/queue",

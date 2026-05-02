@@ -1,5 +1,9 @@
-from __future__ import annotations
+#!/usr/bin/env python3
+# pragma python =3.13.7
+# clients.klines_client
+# $ python3 clients/klines_client.py
 
+from datetime import date
 from typing import Any
 import time
 
@@ -68,3 +72,64 @@ class KlinesClient:
             raise ValueError("Klines /symbols response is empty or invalid")
         self._symbols_cache[cache_key] = (now, normalized)
         return normalized
+
+    async def get_klines(
+        self,
+        start_date: date,
+        end_date: date,
+        symbol: str,
+        *,
+        exchange: str = "binance",
+        timeframe: str = "1m",
+        domain: str = "grindurus.xyz",
+    ) -> list[str]:
+        """GET /klines — список URL на суточные CSV-чанки (как в grindurus-klines-service)."""
+        params: dict[str, Any] = {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "symbol": symbol,
+            "exchange": exchange,
+            "timeframe": timeframe,
+            "domain": domain,
+        }
+        payload = await self.get_json("/klines", params=params)
+        if not isinstance(payload, list):
+            raise ValueError("Klines /klines response must be a list of URLs")
+        links: list[str] = []
+        for item in payload:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("Klines /klines response must contain only non-empty strings")
+            links.append(item.strip())
+        return links
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    async def main():
+        # Replace with your actual base_url and params as needed
+        client = KlinesClient(base_url="https://klines.grindurus.xyz")
+        # try:
+        #     symbols = await client.get_available_symbols("binance")
+        #     print("Available symbols:", symbols)
+        # except Exception as e:
+        #     print("Error fetching symbols:", e)
+        # You can also demonstrate get_json or get_csv usage here if desired.
+        # Пример: добавить вчерашний день
+        from datetime import date, timedelta
+
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+
+        klines_links = await client.get_klines(
+            start_date=yesterday,
+            end_date=today,
+            symbol="ETHUSDT",
+            exchange="binance",
+            timeframe="1m",
+            domain="grindurus.xyz"
+        )
+        print(f"Klines links for {yesterday}: {klines_links}")
+ 
+
+    asyncio.run(main())

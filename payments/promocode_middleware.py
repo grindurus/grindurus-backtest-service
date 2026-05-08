@@ -42,7 +42,7 @@ class PromocodeMiddlewareASGI(BaseHTTPMiddleware):
 
         if result == PromoCodeConsumeResult.invalid:
             return JSONResponse(
-                status_code=405,
+                status_code=400,
                 content={"error": "Invalid promocode", "code": "promocode_invalid"},
             )
         if result == PromoCodeConsumeResult.exhausted:

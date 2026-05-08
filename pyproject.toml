@@ -36,4 +36,4 @@ dev = [
 requires = ["setuptools>=68"]
 
 [tool.setuptools]
-packages = ["db", "boss", "payments"]
+packages = ["db", "payments", "clients", "service"]

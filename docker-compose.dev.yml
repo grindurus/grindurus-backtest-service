@@ -18,13 +18,13 @@ services:
     networks:
       - grindurus
     environment:
-      POSTGRES_USER: backtest
-      POSTGRES_PASSWORD: backtest
-      POSTGRES_DB: backtest
+      POSTGRES_USER: ${POSTGRES_USER:-backtest}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-backtest}
+      POSTGRES_DB: ${POSTGRES_DB:-backtest}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U backtest"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-backtest} -d ${POSTGRES_DB:-backtest}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -41,7 +41,7 @@ services:
     networks:
       - grindurus
     environment:
-      DATABASE_URL: postgresql+asyncpg://backtest:backtest@db:5432/backtest
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-backtest}:${POSTGRES_PASSWORD:-backtest}@db:5432/${POSTGRES_DB:-backtest}
       X_ADMIN_KEY: ${X_ADMIN_KEY}
       X402_API_KEY: ${X402_API_KEY}
       X402_API_SECRET: ${X402_API_SECRET}

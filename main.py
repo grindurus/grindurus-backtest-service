@@ -4,6 +4,7 @@
 
 import logging
 import asyncio
+from asyncio import QueueFull
 from contextlib import suppress
 from typing import Any, Literal
 from datetime import datetime
@@ -64,7 +65,7 @@ class BacktestService:
             base_url=settings.klines_service_url,
             timeout_seconds=settings.klines_timeout_seconds,
         )
-        self._priority_update_queue: asyncio.Queue[tuple[str, Decimal]] = asyncio.Queue()
+        self._priority_queue: asyncio.Queue[tuple[str, Decimal]] = asyncio.Queue(maxsize=10)
         self._priority_worker: asyncio.Task | None = None
         self._setup_middlewares()
         self._setup_routes()
@@ -104,7 +105,7 @@ class BacktestService:
         async def _startup_init_db() -> None:
             await init_db()
             logging.info("Database schema ensured")
-            self._priority_worker = asyncio.create_task(self._priority_update_task())
+            self._priority_worker = asyncio.create_task(self._priority_task())
 
         @self.app.on_event("shutdown")
         async def _shutdown_priority_worker() -> None:
@@ -115,13 +116,16 @@ class BacktestService:
                 await self._priority_worker
             self._priority_worker = None
 
-    async def _priority_update_task(self) -> None:
+    async def _priority_task(self) -> None:
+        logging.info(f"priority worker start")
         while True:
-            backtest_id, delta = await self._priority_update_queue.get()
+            backtest_id, delta = await self._priority_queue.get()
             try:
                 delta_usdc = Decimal(str(delta))
                 async with SessionLocal() as db:
+                    logging.info(f'before invcrease')
                     updated = await increase_queue_priority(db, backtest_id, delta_usdc)
+                    logging.info(f'after increase')
                 if updated is None:
                     logging.warning("priority worker: queue_id=%s not found", backtest_id)
                 else:
@@ -134,7 +138,7 @@ class BacktestService:
             except Exception:
                 logging.exception("priority worker: failed for queue_id=%s delta=%s", backtest_id, delta)
             finally:
-                self._priority_update_queue.task_done()
+                self._priority_queue.task_done()
 
     def _setup_routes(self) -> None:
         async def require_admin(x_admin_key: str | None = Header(default=None, alias="X-Admin-Key")) -> None:
@@ -220,7 +224,7 @@ class BacktestService:
             db: AsyncSession = Depends(get_db),
         ) -> QueueItemResponse:
             payment_method = (body.payment_method or "").strip().lower()
-            priority_delta = Decimal("0") if payment_method == "promocode" else body.priority_usdc
+            priority_delta = Decimal(str(body.priority_usdc or "0"))
             queue_payload = QueueCreate(
                 base_asset=body.base_asset,
                 quote_asset=body.quote_asset,
@@ -234,7 +238,10 @@ class BacktestService:
             item = await enqueue_backtest(db, queue_payload)
             if priority_delta > 0:
                 logging.info("priority queued: queue_id=%s delta=%s", item.id, priority_delta)
-                await self._priority_update_queue.put((item.id, priority_delta))
+                try:
+                    self._priority_queue.put_nowait((item.id, priority_delta))
+                except QueueFull:
+                    logging.warning("priority queue full")
             else:
                 logging.info(
                     "priority skipped: queue_id=%s payment_method=%s delta=%s",

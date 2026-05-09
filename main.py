@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# pragma python =3.13.7
 # $ python3 main.py
 
 import logging
@@ -354,7 +356,7 @@ class BacktestService:
 
         @self.app.get("/health", tags=["infra"])
         async def health() -> dict:
-            return {"status": "ok"}
+            return {"status": "ok", "role": "backtest_service"}
 
         #################### ADMIN ####################
 
